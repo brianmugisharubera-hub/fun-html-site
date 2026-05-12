@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hand Tracking system</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #050a12;
+    color: #e0f0ff;
+    font-family: 'Courier New', monospace;
+    overflow: hidden;
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  #container {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+  }
+
+  #video {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+    opacity: 0.18;
+    filter: saturate(0) brightness(0.7);
+  }
+
+  #canvas {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%;
+    height: 100%;
+  }
+
+  #scanlines {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.08) 2px,
+      rgba(0,0,0,0.08) 4px
+    );
+    z-index: 10;
+  }
+
+  #ui {
+    position: absolute;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    text-align: center;
+    z-index: 20;
+    pointer-events: none;
+  }
+
+  #title {
+    font-size: 11px;
+    letter-spacing: 0.4em;
+    color: #00ffcc88;
+    text-transform: uppercase;
+    text-shadow: 0 0 10px #00ffcc55;
+  }
+
+  #status {
+    margin-top: 6px;
+    font-size: 10px;
+    letter-spacing: 0.25em;
+    color: #ff00ff66;
+    text-shadow: 0 0 8px #ff00ff44;
+  }
+
+  #loading-screen {
+    position: absolute;
+    inset: 0;
+    background: #050a12;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+
+  #loading-screen h1 {
+    font-size: 13px;
+    letter-spacing: 0.5em;
+    color: #00ffcc;
+    text-shadow: 0 0 20px #00ffcc;
+    text-transform: uppercase;
+    margin-bottom: 16px;
+  }
+
+  #loading-bar-wrap {
+    width: 200px;
+    height: 2px;
+    background: #0a1a2a;
+    border: 1px solid #00ffcc33;
+  }
+
+  #loading-bar {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #00ffcc, #ff00ff);
+    box-shadow: 0 0 8px #00ffcc;
+    transition: width 0.3s ease;
+  }
+
+  #loading-msg {
+    margin-top: 12px;
+    font-size: 9px;
+    letter-spacing: 0.3em;
+    color: #ffffff44;
+  }
+
+  #touch-tip {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 9px;
+    letter-spacing: 0.3em;
+    color: #ffffff22;
+    z-index: 20;
+    pointer-events: none;
+    text-transform: uppercase;
+  }
+</style>
+</head>
+<body>
+
+<div id="container">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="canvas"></canvas>
+  <div id="scanlines"></div>
+
+  <div id="ui">
+    <div id="title">Hand tracking</div>
+    <div id="status">initializing...</div>
+  </div>
+
+  <div id="touch-tip">touch fingertips to trigger particle burst</div>
+
+  <div id="loading-screen">
+    <h1>Hand tracker</h1>
+    <div id="loading-bar-wrap"><div id="loading-bar"></div></div>
+    <div id="loading-msg">Loading hand tracking models...</div>
+  </div>
+</div>
+
+<!-- MediaPipe + p5 -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+
+<script>
+let handResults = null;
+let particles = [];
+const FINGERTIP_IDS = [4, 8, 12, 16, 20]; 
+
+new p5(function(p) {
+  let W, H;
+  let glowBuf;
+
+  p.setup = function() {
+    let cnv = p.createCanvas(window.innerWidth, window.innerHeight);
+    cnv.parent('container');
+    cnv.id('canvas');
+    document.getElementById('canvas').style.position = 'absolute';
+    document.getElementById('canvas').style.top = '0';
+    document.getElementById('canvas').style.left = '0';
+    W = p.width; H = p.height;
+    glowBuf = p.createGraphics(W, H);
+    glowBuf.pixelDensity(1);
+    p.colorMode(p.HSB, 360, 100, 100, 100);
+    glowBuf.colorMode(p.HSB, 360, 100, 100, 100);
+  };
+
+  p.windowResized = function() {
+    p.resizeCanvas(window.innerWidth, window.innerHeight);
+    W = p.width; H = p.height;
+    glowBuf = p.createGraphics(W, H);
+    glowBuf.pixelDensity(1);
+    glowBuf.colorMode(p.HSB, 360, 100, 100, 100);
+  };
+
+  p.draw = function() {
+    p.clear();
+    p.background(10, 20, 8, 100);
+
+    if (!handResults || !handResults.multiHandLandmarks) return;
+
+    const hands = handResults.multiHandLandmarks;
+    if (hands.length < 2) {
+      // single hand — just draw joints
+      if (hands.length === 1) drawHandDots(hands[0]);
+      return;
+    }
+
+    const leftHand  = hands[0];
+    const rightHand = hands[1];
+
+    // Draw string connections between fingertips
+    for (let fi = 0; fi < FINGERTIP_IDS.length; fi++) {
+      const lIdx = FINGERTIP_IDS[fi];
+      const rIdx = FINGERTIP_IDS[fi];
+
+      const lp = lm2px(leftHand[lIdx]);
+      const rp = lm2px(rightHand[rIdx]);
+
+      const dist = p.dist(lp.x, lp.y, rp.x, rp.y);
+      const maxDist = W * 0.85;
+      const t = p.constrain(dist / maxDist, 0, 1);
+
+      // Color cycles: cyan → magenta → yellow
+      const hue = (fi * 60 + p.frameCount * 0.4) % 360;
+      const thickness = p.map(t, 0, 1, 3.5, 0.6);
+      const alpha = p.map(t, 0, 1, 92, 40);
+
+      // Elastic sag: add a midpoint displaced perpendicular to string
+      const sagAmount = p.map(dist, 0, maxDist, 0, 60) * (0.5 + 0.5 * Math.sin(p.frameCount * 0.03 + fi));
+      const mx = (lp.x + rp.x) / 2;
+      const my = (lp.y + rp.y) / 2 + sagAmount;
+
+      // Glow pass (blurred, thick)
+      p.noFill();
+      p.strokeWeight(thickness + 6);
+      p.stroke(hue, 90, 100, 18);
+      drawBezierLine(lp, {x: mx, y: my}, rp);
+
+      // Core string
+      p.strokeWeight(thickness);
+      p.stroke(hue, 70, 100, alpha);
+      drawBezierLine(lp, {x: mx, y: my}, rp);
+
+      // Check fingertip touch → particle burst
+      if (dist < 28) spawnBurst(mx, (lp.y + rp.y) / 2, hue);
+    }
+
+    // Draw glowing joint dots for both hands
+    drawHandDots(leftHand);
+    drawHandDots(rightHand);
+
+    // Update + draw particles
+    updateParticles();
+  };
+
+  function lm2px(lm) {
+    // Mirror x because video is mirrored
+    return { x: (1 - lm.x) * W, y: lm.y * H };
+  }
+
+  function drawBezierLine(p1, ctrl, p2) {
+    p.beginShape();
+    p.vertex(p1.x, p1.y);
+    p.quadraticVertex(ctrl.x, ctrl.y, p2.x, p2.y);
+    p.endShape();
+  }
+
+  function drawHandDots(landmarks) {
+    landmarks.forEach((lm, i) => {
+      const pt = lm2px(lm);
+      const isTip = FINGERTIP_IDS.includes(i);
+      const hue = (i * 14 + p.frameCount * 0.5) % 360;
+
+      if (isTip) {
+        // Bright tip dot with halo
+        p.noStroke();
+        p.fill(hue, 60, 100, 20);
+        p.circle(pt.x, pt.y, 22);
+        p.fill(hue, 80, 100, 80);
+        p.circle(pt.x, pt.y, 7);
+        p.fill(180, 0, 100, 90);
+        p.circle(pt.x, pt.y, 3);
+      } else {
+        p.noStroke();
+        p.fill(hue, 50, 100, 50);
+        p.circle(pt.x, pt.y, 4.5);
+      }
+    });
+  }
+
+  function spawnBurst(x, y, hue) {
+    if (Math.random() > 0.35) return; // throttle
+    for (let i = 0; i < 12; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 1.5 + Math.random() * 3.5;
+      particles.push({
+        x, y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        hue: (hue + Math.random() * 40 - 20 + 360) % 360,
+        life: 1.0,
+        size: 2 + Math.random() * 4
+      });
+    }
+  }
+
+  function updateParticles() {
+    particles = particles.filter(pt => pt.life > 0.01);
+    for (const pt of particles) {
+      pt.x += pt.vx;
+      pt.y += pt.vy;
+      pt.vx *= 0.93;
+      pt.vy *= 0.93;
+      pt.life *= 0.91;
+
+      p.noStroke();
+      p.fill(pt.hue, 80, 100, pt.life * 90);
+      const sz = pt.size * pt.life;
+      p.circle(pt.x, pt.y, sz);
+      // glow halo
+      p.fill(pt.hue, 60, 100, pt.life * 30);
+      p.circle(pt.x, pt.y, sz * 3);
+    }
+  }
+});
+
+// ─── MediaPipe Hands ─────────────────────────────────────────────────────────
+async function initMediaPipe() {
+  const video = document.getElementById('video');
+  const loadingBar = document.getElementById('loading-bar');
+  const loadingMsg = document.getElementById('loading-msg');
+  const statusEl  = document.getElementById('status');
+
+  const hands = new Hands({
+    locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+  });
+
+  hands.setOptions({
+    maxNumHands: 2,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.7,
+    minTrackingConfidence: 0.6
+  });
+
+  hands.onResults(results => {
+    handResults = results;
+    const count = results.multiHandLandmarks ? results.multiHandLandmarks.length : 0;
+    statusEl.textContent = count === 0
+      ? 'no hands detected'
+      : count === 1
+        ? '1 hand — show both hands'
+        : '2 hands — weaving strings...';
+  });
+
+  loadingBar.style.width = '30%';
+  loadingMsg.textContent = 'Requesting camera access...';
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 1280, height: 720 } });
+    video.srcObject = stream;
+    await video.play();
+  } catch(e) {
+    loadingMsg.textContent = 'Camera access denied. Please allow camera and reload.';
+    return;
+  }
+
+  loadingBar.style.width = '60%';
+  loadingMsg.textContent = 'Warming up hand detection...';
+
+  const camera = new Camera(video, {
+    onFrame: async () => {
+      await hands.send({ image: video });
+    },
+    width: 1280,
+    height: 720
+  });
+
+  camera.start();
+
+  loadingBar.style.width = '100%';
+  loadingMsg.textContent = 'Ready!';
+
+  setTimeout(() => {
+    document.getElementById('loading-screen').style.transition = 'opacity 0.6s';
+    document.getElementById('loading-screen').style.opacity = '0';
+    setTimeout(() => {
+      document.getElementById('loading-screen').style.display = 'none';
+    }, 700);
+  }, 600);
+}
+
+initMediaPipe();
+</script>
+</body>
+</html>
